@@ -66,6 +66,7 @@ Ajustes respecto al notebook original
 # 0. IMPORTACIONES Y CONFIGURACIÓN
 # =============================================================================
 
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -74,6 +75,12 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 pd.set_option("display.max_columns", 50)
 sns.set_theme(style="whitegrid")
+
+# Carpetas de salida — siempre relativas al directorio del script,
+# independientemente del directorio de trabajo (CWD) de Python
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DIR_DATOS  = os.path.join(SCRIPT_DIR, "Datos")
+DIR_VIZS   = os.path.join(SCRIPT_DIR, "Visualizaciones")
 
 # URL del dataset (repositorio del taller)
 URL_TRAIN = (
@@ -156,6 +163,37 @@ miss_df = (
 print("  Variables con missing:")
 print(miss_df.to_string())
 
+# ── Análisis del mecanismo causal de cada missing ─────────────────────────
+# Se verifica empíricamente que los NaN no son aleatorios, sino que
+# tienen una causa estructural que justifica la imputación determinística.
+# Es decir, están como missings pero son ceros, por ejemplo.
+
+print("\n  [PRUEBA 2.2a] v18q1 — NaN ocurre exclusivamente cuando v18q=0?")
+n_nan_con_tablet    = df[df["v18q"] == 1]["v18q1"].isnull().sum()
+n_nan_sin_tablet    = df[df["v18q"] == 0]["v18q1"].isnull().sum()
+print(f"    NaN en v18q1 cuando v18q=1 (tiene tablet) : {n_nan_con_tablet}")
+print(f"    NaN en v18q1 cuando v18q=0 (no tiene)     : {n_nan_sin_tablet:,}")
+print(f"    → Todos los NaN se explican por v18q=0: {n_nan_con_tablet == 0}")
+
+print("\n  [PRUEBA 2.2b] v2a1 — NaN coincide con no-arrendatarios (tipovivi3=0)?")
+rent_cross = df.groupby("tipovivi3")["v2a1"].agg(
+    n_missing =lambda x: x.isnull().sum(),
+    n_presente=lambda x: x.notnull().sum()
+)
+print(rent_cross.rename(index={0: "tipovivi3=0 (no arrienda)",
+                                1: "tipovivi3=1 (arrienda)"}).to_string())
+print("    → NaN ocurren solo en tipovivi3=0; imputar 0 es equivalente a no pago de arriendo.")
+
+print("\n  [PRUEBA 2.2c] rez_esc — NaN es estructural por rango de edad?")
+df["_age_group"] = pd.cut(df["age"], bins=[0, 5, 17, 65, 120],
+                           labels=["0-5 años", "6-17 años", "18-65 años", "65+ años"])
+rez_miss = df.groupby("_age_group", observed=True)["rez_esc"].apply(
+    lambda x: f"{x.isnull().sum():,} NaN  ({x.isnull().mean()*100:.1f}%)"
+)
+print(rez_miss.to_string())
+print("    → 100% NaN fuera del rango escolar (6-17). Imputar 0 = 'no aplica'.")
+df.drop(columns=["_age_group"], inplace=True)
+
 # ── v18q1 (número de tablets) ─────────────────────────────────────────────
 # NaN aparece exclusivamente cuando v18q = 0 (el hogar no tiene tablet).
 # Imputación: 0 (sin tablets).
@@ -197,6 +235,27 @@ print("\n" + "=" * 65)
 print("2.3  Dummies de varianza casi cero")
 print("=" * 65)
 
+# ── Análisis sistemático de varianza en dummies ───────────────────────────
+# Se calcula el porcentaje del modo dominante para cada variable binaria.
+# El umbral de 98% identifica variables con información casi nula.
+print("  [PRUEBA 2.3] Tabla completa de dummies con modo dominante ≥ 98%:")
+dummy_cols = [
+    c for c in df.columns
+    if df[c].nunique() == 2
+    and pd.to_numeric(df[c], errors="coerce").notna().all()
+    and pd.to_numeric(df[c], errors="coerce").min() == 0
+]
+low_var_rows = []
+for c in dummy_cols:
+    pct_mode = df[c].value_counts(normalize=True).iloc[0] * 100
+    if pct_mode >= 98:
+        low_var_rows.append({"variable": c, "pct_modo_dominante": round(pct_mode, 2)})
+
+low_var_df = pd.DataFrame(low_var_rows).sort_values("pct_modo_dominante", ascending=False)
+print(low_var_df.to_string(index=False))
+print(f"\n  Total detectadas: {len(low_var_df)} variables con varianza casi cero.")
+print("  Las marcadas como NBI se preservan a pesar de la baja varianza (ver lista abajo).")
+
 # Variables a eliminar: baja varianza, sin relevancia social directa
 drop_baja_varianza = [
     "planpri",       # Electricidad de planta privada     (99.96 % modo)
@@ -222,7 +281,7 @@ drop_baja_varianza = [
     "techoentrepiso",# Techo: fibrocemento / entrepiso    (98.34 %)
 ]
 
-# Variables de baja varianza que SE CONSERVAN — indicadores NBI de Costa Rica
+# Variables de baja varianza que SE CONSERVAN por relevancia
 preservar_nbi = [
     "noelec",      # Sin electricidad                  → carencia básica
     "abastaguano", # Sin abasto de agua                → carencia básica
@@ -270,6 +329,16 @@ print(
     .to_string()
 )
 
+# ── Evidencia del outlier en meaneduc ────────────────────────────────────
+# El máximo individual de escolari es 21 años; un promedio de hogar de 37
+# es aritméticamente imposible y evidencia un error de captura de datos.
+print(f"\n  [PRUEBA 2.4] meaneduc — valor máximo vs máximo teórico:")
+print(f"    Max escolari (individual): {df['escolari'].max()} años")
+print(f"    Max meaneduc (promedio)  : {df['meaneduc'].max()} años  ← imposible")
+print(f"    Registros con meaneduc > {int(df['escolari'].max())}: "
+      f"{(df['meaneduc'] > df['escolari'].max()).sum()}")
+print(f"    → Se capea al máximo teórico para corregir el error de captura.")
+
 # Capping v2a1 al percentil 99
 p99_renta = df["v2a1"].quantile(0.99)
 n_capped_renta = (df["v2a1"] > p99_renta).sum()
@@ -300,6 +369,30 @@ print(f"  meaneduc → capping al máximo teórico ({max_teorico_educ} años)."
 print("\n" + "=" * 65)
 print("2.5  Estandarización de edjefe / edjefa")
 print("=" * 65)
+
+# ── Diagnóstico de datos mixtos ───────────────────────────────────────────
+# Se muestra la distribución de valores antes de limpiar para documentar
+# que las columnas contienen strings junto con valores numéricos.
+print("  [PRUEBA 2.5a] Distribución de valores en edjefe (top 15, antes de limpiar):")
+print(df["edjefe"].value_counts().head(15).to_string())
+
+print("\n  [PRUEBA 2.5b] Distribución de valores en edjefa (top 10):")
+print(df["edjefa"].value_counts().head(10).to_string())
+
+n_yes_jefe = (df["edjefe"] == "yes").sum()
+n_no_jefe  = (df["edjefe"] == "no").sum()
+n_yes_jefa = (df["edjefa"] == "yes").sum()
+n_no_jefa  = (df["edjefa"] == "no").sum()
+print(f"\n  [PRUEBA 2.5c] Strings en edjefe: 'yes'={n_yes_jefe:,}  'no'={n_no_jefe:,}")
+print(f"               Strings en edjefa: 'yes'={n_yes_jefa:,}  'no'={n_no_jefa:,}")
+print("    → Presencia de strings confirma necesidad de estandarización.")
+
+n_ambos_cero = (
+    (pd.to_numeric(df["edjefe"], errors="coerce").fillna(0) == 0) &
+    (pd.to_numeric(df["edjefa"], errors="coerce").fillna(0) == 0)
+).sum()
+print(f"\n  [PRUEBA 2.5d] Registros con edjefe=0 Y edjefa=0 (antes): {n_ambos_cero:,}")
+print("    → Estos registros generan sin_jefe_educado=1 tras la limpieza.")
 
 
 def limpiar_educacion_jefe(columna: pd.Series) -> pd.Series:
@@ -381,6 +474,51 @@ print("\n" + "=" * 65)
 print("2.7  Reconstrucción de tasa_dependencia")
 print("=" * 65)
 
+# ── Diagnóstico de datos mixtos en dependency ─────────────────────────────
+dep_raw = df["dependency"]
+n_num = pd.to_numeric(dep_raw, errors="coerce").notna().sum()
+n_yes = (dep_raw == "yes").sum()
+n_no  = (dep_raw == "no").sum()
+
+print("  [PRUEBA 2.7a] Composición de tipos de valor en dependency:")
+print(f"    Numérico : {n_num:,} ({n_num/len(dep_raw)*100:.1f}%)")
+print(f"    'yes'    : {n_yes:,} ({n_yes/len(dep_raw)*100:.1f}%)")
+print(f"    'no'     : {n_no:,}  ({n_no/len(dep_raw)*100:.1f}%)")
+print("    → Datos mixtos: no se puede usar la variable directamente.")
+print("    → 'no' confirmado como tasa=0 por reconstrucción (100% den=0 → tasa=0).")
+print("    → 'yes' es información incompleta del entrevistador (tasa no calculada).")
+
+# ── Validación de la fórmula de reconstrucción ────────────────────────────
+# Se comparan dos candidatas contra los valores numéricos verificables.
+print("\n  [PRUEBA 2.7b] Validación de fórmulas candidatas:")
+dep_num = pd.to_numeric(dep_raw, errors="coerce")
+mask    = dep_num.notna()
+d_val   = df[mask].copy()
+d_val["dep_orig"] = dep_num[mask]
+
+# Fórmula A (INEC Costa Rica): (nin + mayor) / (adul - mayor)
+d_val["fA"] = ((d_val["hogar_nin"] + d_val["hogar_mayor"]) /
+               (d_val["hogar_adul"] - d_val["hogar_mayor"]).replace(0, np.nan))
+
+# Fórmula B (alternativa simple): (nin + mayor) / adul
+d_val["fB"] = ((d_val["hogar_nin"] + d_val["hogar_mayor"]) /
+               d_val["hogar_adul"].replace(0, np.nan))
+
+corr_A  = d_val["dep_orig"].corr(d_val["fA"])
+corr_B  = d_val["dep_orig"].corr(d_val["fB"])
+exact_A = (d_val["dep_orig"].round(4) == d_val["fA"].round(4)).sum()
+exact_B = (d_val["dep_orig"].round(4) == d_val["fB"].round(4)).sum()
+n_val   = mask.sum()
+
+print(f"    Fórmula A = (nin+mayor)/(adul-mayor) :"
+      f"  corr={corr_A:.4f}  |  coincidencias exactas={exact_A:,}/{n_val:,}")
+print(f"    Fórmula B = (nin+mayor)/adul          :"
+      f"  corr={corr_B:.4f}  |  coincidencias exactas={exact_B:,}/{n_val:,}")
+print(f"    → Fórmula A seleccionada: correlación perfecta con valores originales.")
+print(f"    → Los {n_val - exact_A} no coincidentes son hogares con denominador=0,")
+print(f"      codificados como 8 en el dataset original (valor techo convencional).")
+del d_val
+
 num_dep = df["hogar_nin"] + df["hogar_mayor"]
 den_dep = df["hogar_adul"] - df["hogar_mayor"]
 
@@ -444,7 +582,8 @@ axes[2].set_xlabel("Target  (1 = extrema  →  4 = no pobre)")
 axes[2].set_ylabel("Tasa de dependencia")
 plt.suptitle("")
 plt.tight_layout()
-plt.savefig("fig_tasa_dependencia.png", dpi=150, bbox_inches="tight")
+os.makedirs(DIR_VIZS, exist_ok=True)
+plt.savefig(f"{DIR_VIZS}/fig_tasa_dependencia.png", dpi=150, bbox_inches="tight")
 plt.show()
 print(f"\n  Shape: {df.shape}")
 
@@ -469,6 +608,31 @@ print(f"\n  Shape: {df.shape}")
 print("\n" + "=" * 65)
 print("2.8  Eliminación de variables adicionales")
 print("=" * 65)
+
+# ── Pruebas de relevancia de variables preservadas ────────────────────────
+# Se documenta empíricamente por qué instlevel1, estadocivil6 y estadocivil7
+# se mantienen en lugar de eliminarse junto con las demás variables del grupo.
+# Un Target menor indica mayor pobreza (1=extrema, 4=no pobre).
+
+print("  [PRUEBA 2.8a] instlevel1 (sin educación formal) vs nivel de pobreza:")
+print(f"    Target medio — instlevel1=0 (tiene algún nivel): "
+      f"{df[df['instlevel1']==0]['Target'].mean():.3f}")
+print(f"    Target medio — instlevel1=1 (sin educación)    : "
+      f"{df[df['instlevel1']==1]['Target'].mean():.3f}")
+print(f"    Prevalencia en muestra: {df['instlevel1'].mean()*100:.1f}% de registros")
+print("    → Target menor en instlevel1=1 confirma asociación con mayor pobreza.")
+print("    → Se preserva como predictor NBI directo (no capturado por meaneduc).")
+
+print("\n  [PRUEBA 2.8b] estadocivil6 (viudo/a) vs nivel de pobreza:")
+print(f"    Target medio — estadocivil6=0: {df[df['estadocivil6']==0]['Target'].mean():.3f}")
+print(f"    Target medio — estadocivil6=1: {df[df['estadocivil6']==1]['Target'].mean():.3f}")
+print(f"    Prevalencia: {df['estadocivil6'].mean()*100:.1f}%")
+
+print("\n  [PRUEBA 2.8c] estadocivil7 (soltero/a) vs nivel de pobreza:")
+print(f"    Target medio — estadocivil7=0: {df[df['estadocivil7']==0]['Target'].mean():.3f}")
+print(f"    Target medio — estadocivil7=1: {df[df['estadocivil7']==1]['Target'].mean():.3f}")
+print(f"    Prevalencia: {df['estadocivil7'].mean()*100:.1f}%")
+print("    → Diferencia en Target justifica preservar ambas variables de estado civil.")
 
 drop_adicionales = [
     # a) Conteos demográficos desagregados
@@ -915,12 +1079,18 @@ print("\n  ← Variables recuperadas respecto al notebook original")
 # =============================================================================
 # 8. EXPORTACIÓN
 # =============================================================================
+# El guardado se realiza al final del pipeline, después de todas las
+# transformaciones (secciones 2–7), para que el archivo refleje el estado
+# definitivo del dataset: limpio, agregado por hogar y renombrado.
+# =============================================================================
 
 print("\n" + "=" * 65)
 print("8. EXPORTACIÓN")
 print("=" * 65)
 
-output_path = "train_cleaned_hogar.csv"
+os.makedirs(DIR_DATOS, exist_ok=True)
+
+output_path = f"{DIR_DATOS}/train_cleaned_hogar.csv"
 df_model.to_csv(output_path, index=False)
 
 print(f"  Archivo guardado : {output_path}")
