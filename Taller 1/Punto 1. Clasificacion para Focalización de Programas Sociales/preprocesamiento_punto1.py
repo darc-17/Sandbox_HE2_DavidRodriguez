@@ -44,7 +44,8 @@ Pipeline
      6a. Resolución de multicolinealidades perfectas post-VIF
      6b. Reducción de dimensionalidad post-agregación
   7. Renombrado de variables a nombres descriptivos
-  8. Exportación del dataset limpio
+  8. Feature engineering (4 variables compuestas)
+  9. Exportación del dataset limpio
 
 Ajustes respecto al notebook original
 --------------------------------------
@@ -60,6 +61,13 @@ Ajustes respecto al notebook original
     fórmula original del INEC (verificada: correlación = 1.0 con valores
     numéricos del dataset).
   • female: agregada con mean (proporción de mujeres), no con max.
+  • 4 variables compuestas nuevas (sec. 8), con eliminación de sus componentes:
+      - Indice_Activos_Tech          : suma de 5 activos duraderos (sin doble
+                                       conteo mobilephone + qmobilephone).
+      - Privacion_Servicios_Basicos  : conteo NBI de carencias básicas (5 dims).
+      - Calidad_Materiales_Vivienda  : índice de materiales (sin Techo_Zinc,
+                                       que es mayoritario en todos los estratos).
+      - Hacinamiento_Severo          : dummy > 3 personas/cuarto (umbral no lineal).
 """
 
 # =============================================================================
@@ -82,10 +90,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DIR_DATOS  = os.path.join(SCRIPT_DIR, "Datos")
 DIR_VIZS   = os.path.join(SCRIPT_DIR, "Visualizaciones")
 
-# URL del dataset (repositorio del taller)
-URL_TRAIN = (
+# Rutas del dataset — local tiene preferencia (más rápido, sin red)
+LOCAL_TRAIN = os.path.join(SCRIPT_DIR, "Datos", "train.csv")
+URL_TRAIN   = (
     "https://raw.githubusercontent.com/darc-17/Sandbox_HE2_DavidRodriguez"
-    "/refs/heads/main/Taller%201/Punto%201.%20Clasificacion%20para%20"
+    "/main/Taller%201/Punto%201.%20Clasificacion%20para%20"
     "Focalizaci%C3%B3n%20de%20Programas%20Sociales/train.csv"
 )
 
@@ -97,7 +106,12 @@ print("=" * 65)
 print("1. CARGA DE DATOS")
 print("=" * 65)
 
-df = pd.read_csv(URL_TRAIN)
+if os.path.exists(LOCAL_TRAIN):
+    df = pd.read_csv(LOCAL_TRAIN)
+    print(f"  Fuente : archivo local")
+else:
+    df = pd.read_csv(URL_TRAIN)
+    print(f"  Fuente : URL remota (archivo local no encontrado)")
 
 print(f"  Shape inicial : {df.shape[0]:,} individuos · {df.shape[1]} variables")
 print(f"  Tipos de dato :\n{df.dtypes.value_counts().rename('columnas').to_string()}")
@@ -699,6 +713,9 @@ print("\n" + "=" * 65)
 print("3. BINARIZACIÓN DEL TARGET")
 print("=" * 65)
 
+# Guardar distribución para la visualización posterior (antes de binarizar)
+_dist_target_orig = df["Target"].value_counts(normalize=True).mul(100).round(1).sort_index()
+
 print("  Distribución original (individuos):")
 print(
     df["Target"]
@@ -1070,22 +1087,261 @@ print(f"  Variables en el dataset final: {len(df_model.columns)}")
 print(f"  Shape: {df_model.shape}")
 print("\n  Columnas finales:")
 for i, col in enumerate(df_model.columns, 1):
-    marker = " ←" if col in ("Pared_Desecho", "Piso_Tierra",
-                              "Sin_Educacion", "Jefe_Viudo", "Jefe_Soltero",
+    marker = " ←" if col in ("Sin_Educacion", "Jefe_Viudo", "Jefe_Soltero",
                               "Tasa_Dependencia") else ""
     print(f"    {i:3d}.  {col}{marker}")
 print("\n  ← Variables recuperadas respecto al notebook original")
 
 # =============================================================================
-# 8. EXPORTACIÓN
+# 8. FEATURE ENGINEERING — 4 VARIABLES COMPUESTAS
 # =============================================================================
-# El guardado se realiza al final del pipeline, después de todas las
-# transformaciones (secciones 2–7), para que el archivo refleje el estado
-# definitivo del dataset: limpio, agregado por hogar y renombrado.
+# Se crean índices que resumen dimensiones clave de bienestar del hogar.
+# Tras la creación se eliminan las variables componentes para reducir
+# dimensionalidad: la información queda capturada en los índices.
+#
+# Variables creadas:
+#   • Indice_Activos_Tech         : suma de activos duraderos (proxy ingreso
+#                                   permanente). Sin Tiene_Celular (ya eliminada
+#                                   en sec. 6b) para evitar doble conteo.
+#   • Privacion_Servicios_Basicos : conteo NBI — 5 dimensiones de carencia
+#                                   (electricidad, agua, saneamiento, combustible,
+#                                   disposición de basura).
+#   • Calidad_Materiales_Vivienda : índice +/− de materiales. Se excluye
+#                                   Techo_Zinc (mayoritario en todos los estratos;
+#                                   no discrimina pobreza).
+#   • Hacinamiento_Severo         : dummy binaria > 3 personas/cuarto.
+#                                   Captura el efecto de umbral no lineal.
 # =============================================================================
 
 print("\n" + "=" * 65)
-print("8. EXPORTACIÓN")
+print("8. FEATURE ENGINEERING")
+print("=" * 65)
+
+# ── 8.1  Índice de activos tecnológicos ──────────────────────────────────
+df_model["Indice_Activos_Tech"] = (
+    df_model["Tiene_Nevera"]
+    + df_model["Tiene_Computador"]
+    + df_model["Tiene_TV"]
+    + df_model["Cant_Celulares"]
+    + df_model["Cantidad_Tablets"]
+)
+print(f"  Indice_Activos_Tech          →  "
+      f"rango {df_model['Indice_Activos_Tech'].min():.0f}–{df_model['Indice_Activos_Tech'].max():.0f},  "
+      f"media {df_model['Indice_Activos_Tech'].mean():.2f}")
+
+# ── 8.2  Índice de privaciones de servicios básicos (NBI) ────────────────
+_carencia_agua   = (
+    (df_model["Sin_Abasto_Agua"] == 1) | (df_model["Agua_Fuera_Vivienda"] == 1)
+).astype(int)
+_carencia_basura = (
+    (df_model["Basura_Enterrada"] == 1)
+    | (df_model["Basura_Quemada"] == 1)
+    | (df_model["Basura_Rio_Creek"] == 1)
+).astype(int)
+df_model["Privacion_Servicios_Basicos"] = (
+    (df_model["Sin_Electricidad"] == 1).astype(int)
+    + _carencia_agua
+    + (df_model["Sin_Inodoro"] == 1).astype(int)
+    + (df_model["Cocina_Carbon_Lena"] == 1).astype(int)
+    + _carencia_basura
+)
+print(f"  Privacion_Servicios_Basicos  →  "
+      f"rango {df_model['Privacion_Servicios_Basicos'].min():.0f}–{df_model['Privacion_Servicios_Basicos'].max():.0f},  "
+      f"media {df_model['Privacion_Servicios_Basicos'].mean():.2f}")
+
+# ── 8.3  Índice de calidad de materiales de la vivienda ──────────────────
+# (+1) materiales precarios  ←→  (−1) materiales nobles.
+# Techo_Zinc excluido: material más frecuente en Costa Rica en todos los
+# estratos socioeconómicos; no discrimina pobreza.
+df_model["Calidad_Materiales_Vivienda"] = (
+    df_model["Pared_Desecho"]
+    + df_model["Piso_Tierra"]
+    - df_model["Piso_Mosaico_Ceramica"]
+    - df_model["Tiene_Cielorazo"]
+    - df_model["Pared_Bloque_Ladrillo"]
+)
+print(f"  Calidad_Materiales_Vivienda  →  "
+      f"rango {df_model['Calidad_Materiales_Vivienda'].min():.0f}–{df_model['Calidad_Materiales_Vivienda'].max():.0f},  "
+      f"media {df_model['Calidad_Materiales_Vivienda'].mean():.2f}")
+
+# ── 8.4  Hacinamiento severo (dummy) ─────────────────────────────────────
+# Umbral = 3 personas/cuarto (estándar latinoamericano de medición de pobreza).
+# Se mantiene Personas_por_Cuarto (continua) como complemento de la binaria.
+df_model["Hacinamiento_Severo"] = (df_model["Personas_por_Cuarto"] > 3).astype(int)
+print(f"  Hacinamiento_Severo          →  "
+      f"{df_model['Hacinamiento_Severo'].sum()} hogares "
+      f"({df_model['Hacinamiento_Severo'].mean()*100:.1f}%)")
+
+# ── Eliminación de variables componentes ─────────────────────────────────
+# Los índices capturan la información de sus componentes; mantenerlos
+# generaría redundancia y elevaría el VIF innecesariamente.
+drop_componentes = [
+    # Indice_Activos_Tech
+    "Tiene_Nevera", "Tiene_Computador", "Tiene_TV",
+    "Cant_Celulares", "Cantidad_Tablets",
+    # Privacion_Servicios_Basicos
+    "Sin_Electricidad", "Sin_Abasto_Agua", "Agua_Fuera_Vivienda",
+    "Sin_Inodoro", "Cocina_Carbon_Lena",
+    "Basura_Enterrada", "Basura_Quemada", "Basura_Rio_Creek",
+    # Calidad_Materiales_Vivienda
+    "Pared_Desecho", "Piso_Tierra",
+    "Piso_Mosaico_Ceramica", "Tiene_Cielorazo", "Pared_Bloque_Ladrillo",
+]
+print(f"\n  Eliminando {len(drop_componentes)} variables componentes...")
+df_model.drop(columns=[c for c in drop_componentes if c in df_model.columns], inplace=True)
+print(f"  Shape tras feature engineering: {df_model.shape}")
+
+# ── 8.5  Visualizaciones diagnósticas para storytelling ──────────────────
+# Tres figuras de alta pertinencia para el cliente BID:
+#   Fig 1 — Distribución del Target: del sistema de 4 categorías SINIRUBE
+#            a la clasificación binaria de pobreza por hogar.
+#   Fig 2 — Los índices compuestos discriminan pobres de no pobres: valida
+#            que el feature engineering captura señal real.
+#   Fig 3 — Perfil geográfico: distribución de la pobreza por región y
+#            zona urbana/rural (clave para política pública).
+
+print("\n  Generando visualizaciones diagnósticas...")
+os.makedirs(DIR_VIZS, exist_ok=True)
+
+_POBRE    = "#d73027"   # rojo
+_NO_POBRE = "#4575b4"   # azul
+
+# ── Fig 1: Distribución del Target ───────────────────────────────────────
+fig1, ax1 = plt.subplots(1, 2, figsize=(12, 5))
+
+# Panel izquierdo: 4 categorías originales (individuos)
+labels_orig = ["Pobreza\nextrema", "Pobreza\nmoderada", "Vulnerable", "No pobre"]
+colors_orig = [_POBRE, "#fc8d59", "#fee090", _NO_POBRE]
+bars_o = ax1[0].bar(labels_orig, _dist_target_orig.values,
+                    color=colors_orig, edgecolor="white", width=0.6)
+for bar, val in zip(bars_o, _dist_target_orig.values):
+    ax1[0].text(bar.get_x() + bar.get_width() / 2, val + 0.5,
+                f"{val:.1f}%", ha="center", fontsize=10, fontweight="bold")
+ax1[0].set_title("Distribución original\n(4 categorías SINIRUBE)", fontsize=12, fontweight="bold")
+ax1[0].set_ylabel("% de individuos")
+ax1[0].set_ylim(0, _dist_target_orig.max() * 1.2)
+
+# Panel derecho: Target binarizado por hogar
+_dist_bin = (df_model["Target"].value_counts(normalize=True)
+             .mul(100).round(1)
+             .rename({0: "No pobre", 1: "Pobre"})
+             .sort_index())
+bars_b = ax1[1].bar(_dist_bin.index, _dist_bin.values,
+                    color=[_NO_POBRE, _POBRE], edgecolor="white", width=0.4)
+for bar, val in zip(bars_b, _dist_bin.values):
+    ax1[1].text(bar.get_x() + bar.get_width() / 2, val + 0.5,
+                f"{val:.1f}%", ha="center", fontsize=13, fontweight="bold")
+ax1[1].set_title("Target binarizado\n(regla de mayoría por hogar)", fontsize=12, fontweight="bold")
+ax1[1].set_ylabel("% de hogares")
+ax1[1].set_ylim(0, _dist_bin.max() * 1.2)
+
+fig1.suptitle("Del sistema de 4 categorías SINIRUBE a la clasificación binaria de pobreza",
+              fontsize=11, y=1.01)
+plt.tight_layout()
+plt.savefig(f"{DIR_VIZS}/fig1_distribucion_target.png", dpi=150, bbox_inches="tight")
+plt.show()
+print("    fig1_distribucion_target.png  ✓")
+
+# ── Fig 2: Índices compuestos por categoría de pobreza ───────────────────
+fig2, ax2 = plt.subplots(1, 3, figsize=(14, 5))
+
+_indices_viz = [
+    ("Indice_Activos_Tech",          "Índice de\nActivos Tech",          "↑ mayor = menos pobre"),
+    ("Privacion_Servicios_Basicos",  "Privaciones de\nServicios Básicos","↑ mayor = más pobre"),
+    ("Calidad_Materiales_Vivienda",  "Calidad de\nMateriales Vivienda",  "↑ mayor = más pobre"),
+]
+for ax, (var, titulo, nota) in zip(ax2, _indices_viz):
+    medias = df_model.groupby("Target")[var].mean()
+    ax.bar([0, 1], medias.values, color=[_NO_POBRE, _POBRE], edgecolor="white", width=0.5)
+    for x, val in enumerate(medias.values):
+        offset = 0.04 if val >= 0 else -0.04
+        va     = "bottom" if val >= 0 else "top"
+        ax.text(x, val + offset, f"{val:.2f}",
+                ha="center", va=va, fontsize=12, fontweight="bold")
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["No pobre", "Pobre"], fontsize=10)
+    ax.set_title(f"{titulo}\n{nota}", fontsize=10, fontweight="bold")
+    ax.set_ylabel("Media del índice")
+    ax.axhline(0, color="gray", linewidth=0.8, linestyle=":")
+
+fig2.suptitle("Los índices compuestos discriminan claramente entre hogares pobres y no pobres",
+              fontsize=11, y=1.01)
+plt.tight_layout()
+plt.savefig(f"{DIR_VIZS}/fig2_indices_por_pobreza.png", dpi=150, bbox_inches="tight")
+plt.show()
+print("    fig2_indices_por_pobreza.png  ✓")
+
+# ── Fig 3: Perfil geográfico de la pobreza ───────────────────────────────
+fig3, ax3 = plt.subplots(1, 2, figsize=(13, 5))
+
+# Tasa de pobreza por región
+_mapa_reg = {
+    "Region_Central":          "Central",
+    "Region_Chorotega":        "Chorotega",
+    "Region_Pacifico_Central": "Pacífico Central",
+    "Region_Brunca":           "Brunca",
+    "Region_Huetar_Atlantica": "Huetar Atlántica",
+}
+_tasa_reg = {}
+_cols_reg = [c for c in _mapa_reg if c in df_model.columns]
+for col, nombre in _mapa_reg.items():
+    if col in df_model.columns:
+        sub = df_model[df_model[col] == 1]
+        if len(sub) > 0:
+            _tasa_reg[nombre] = sub["Target"].mean() * 100
+# Huetar Norte = hogares no asignados a ninguna otra región (lugar6 = referencia)
+_mask_norte = df_model[_cols_reg].sum(axis=1) == 0
+if _mask_norte.sum() > 0:
+    _tasa_reg["Huetar Norte"] = df_model[_mask_norte]["Target"].mean() * 100
+
+_tasa_s    = pd.Series(_tasa_reg).sort_values()
+_media_nac = df_model["Target"].mean() * 100
+_color_reg = [_POBRE if v > _media_nac else _NO_POBRE for v in _tasa_s.values]
+
+ax3[0].barh(_tasa_s.index, _tasa_s.values, color=_color_reg, edgecolor="white")
+ax3[0].axvline(_media_nac, color="black", linestyle="--", linewidth=1.5,
+               label=f"Media nacional ({_media_nac:.1f}%)")
+for i, val in enumerate(_tasa_s.values):
+    ax3[0].text(val + 0.4, i, f"{val:.1f}%", va="center", fontsize=9)
+ax3[0].set_title("Tasa de pobreza por región", fontsize=11, fontweight="bold")
+ax3[0].set_xlabel("% de hogares pobres")
+ax3[0].legend(fontsize=8)
+ax3[0].set_xlim(0, _tasa_s.max() * 1.25)
+
+# Urbano vs rural
+if "Zona_Urbana" in df_model.columns:
+    _t_urb = df_model[df_model["Zona_Urbana"] == 1]["Target"].mean() * 100
+    _t_rur = df_model[df_model["Zona_Urbana"] == 0]["Target"].mean() * 100
+    _areas  = ["Urbana", "Rural"]
+    _tasas  = [_t_urb, _t_rur]
+    _c_area = [_NO_POBRE if _t_urb < _t_rur else _POBRE,
+               _POBRE    if _t_rur > _t_urb else _NO_POBRE]
+    bars_a = ax3[1].bar(_areas, _tasas, color=_c_area, edgecolor="white", width=0.4)
+    for bar, val in zip(bars_a, _tasas):
+        ax3[1].text(bar.get_x() + bar.get_width() / 2, val + 0.5,
+                    f"{val:.1f}%", ha="center", fontsize=13, fontweight="bold")
+    ax3[1].set_title("Pobreza: Urbano vs Rural", fontsize=11, fontweight="bold")
+    ax3[1].set_ylabel("% de hogares pobres")
+    ax3[1].set_ylim(0, max(_tasas) * 1.2)
+
+fig3.suptitle("Perfil geográfico de la pobreza — Costa Rica", fontsize=12, fontweight="bold")
+plt.tight_layout()
+plt.savefig(f"{DIR_VIZS}/fig3_perfil_geografico.png", dpi=150, bbox_inches="tight")
+plt.show()
+print("    fig3_perfil_geografico.png    ✓")
+print(f"\n  3 figuras guardadas en: {DIR_VIZS}")
+
+# =============================================================================
+# 9. EXPORTACIÓN
+# =============================================================================
+# El guardado se realiza al final del pipeline, después de todas las
+# transformaciones (secciones 2–8), para que el archivo refleje el estado
+# definitivo del dataset: limpio, agregado por hogar, renombrado y con
+# las variables compuestas de feature engineering incorporadas.
+# =============================================================================
+
+print("\n" + "=" * 65)
+print("9. EXPORTACIÓN")
 print("=" * 65)
 
 os.makedirs(DIR_DATOS, exist_ok=True)
@@ -1106,3 +1362,4 @@ print(
 print("\n" + "=" * 65)
 print("  Pipeline completado exitosamente.")
 print("=" * 65)
+
