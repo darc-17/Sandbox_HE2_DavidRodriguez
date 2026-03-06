@@ -45,29 +45,8 @@ Pipeline
      6b. Reducción de dimensionalidad post-agregación
   7. Renombrado de variables a nombres descriptivos
   8. Feature engineering (4 variables compuestas)
-  9. Exportación del dataset limpio
-
-Ajustes respecto al notebook original
---------------------------------------
-  • meaneduc: capping al máximo teórico (21 años); el valor 37 es imposible.
-  • instlevel1 (sin educación): preservada — es indicador NBI directo y
-    tiene correlación confirmada con pobreza (Target medio 2.92 vs 3.34).
-  • estadocivil6 (viudo/a) y estadocivil7 (soltero/a): preservadas —
-    asociadas a hogares monoparentales vulnerables.
-  • pareddes (paredes de desecho) y pisonotiene (piso de tierra): preservadas
-    en la reducción final — son mediciones objetivas de material, distintas
-    de la evaluación subjetiva epared1/eviv1.
-  • dependency: eliminada y reconstruida como tasa_dependencia usando la
-    fórmula original del INEC (verificada: correlación = 1.0 con valores
-    numéricos del dataset).
-  • female: agregada con mean (proporción de mujeres), no con max.
-  • 4 variables compuestas nuevas (sec. 8), con eliminación de sus componentes:
-      - Indice_Activos_Tech          : suma de 5 activos duraderos (sin doble
-                                       conteo mobilephone + qmobilephone).
-      - Privacion_Servicios_Basicos  : conteo NBI de carencias básicas (5 dims).
-      - Calidad_Materiales_Vivienda  : índice de materiales (sin Techo_Zinc,
-                                       que es mayoritario en todos los estratos).
-      - Hacinamiento_Severo          : dummy > 3 personas/cuarto (umbral no lineal).
+  9. Estandarización de variables numéricas continuas
+ 10. Exportación del dataset limpio
 """
 
 # =============================================================================
@@ -80,6 +59,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from sklearn.preprocessing import StandardScaler
 
 pd.set_option("display.max_columns", 50)
 sns.set_theme(style="whitegrid")
@@ -123,18 +103,13 @@ print(f"  Tipos de dato :\n{df.dtypes.value_counts().rename('columnas').to_strin
 # -----------------------------------------------------------------------------
 # 2.1  ELIMINACIÓN DE VARIABLES REDUNDANTES
 # -----------------------------------------------------------------------------
-# Criterio: variables que son transformaciones matemáticas de otras (SQB),
-# duplicados exactos, o sumas de partes ya disponibles por separado.
-# -----------------------------------------------------------------------------
 
 print("\n" + "=" * 65)
 print("2.1  Eliminación de variables redundantes")
 print("=" * 65)
 
 drop_redundantes = [
-    # Términos cuadráticos (SQB) — transformaciones de variables ya presentes.
-    # Se eliminan porque el modelo puede aprender no-linealidades por su cuenta
-    # o generarlas explícitamente si es necesario.
+    # SQB — transformaciones de variables ya presentes.
     "SQBescolari", "SQBage", "agesq", "SQBhogar_total",
     "SQBedjefe", "SQBhogar_nin", "SQBovercrowding",
     "SQBdependency", "SQBmeaned",
@@ -180,11 +155,10 @@ print(miss_df.to_string())
 # ── Análisis del mecanismo causal de cada missing ─────────────────────────
 # Se verifica empíricamente que los NaN no son aleatorios, sino que
 # tienen una causa estructural que justifica la imputación determinística.
-# Es decir, están como missings pero son ceros, por ejemplo.
 
 print("\n  [PRUEBA 2.2a] v18q1 — NaN ocurre exclusivamente cuando v18q=0?")
-n_nan_con_tablet    = df[df["v18q"] == 1]["v18q1"].isnull().sum()
-n_nan_sin_tablet    = df[df["v18q"] == 0]["v18q1"].isnull().sum()
+n_nan_con_tablet = df[df["v18q"] == 1]["v18q1"].isnull().sum()
+n_nan_sin_tablet = df[df["v18q"] == 0]["v18q1"].isnull().sum()
 print(f"    NaN en v18q1 cuando v18q=1 (tiene tablet) : {n_nan_con_tablet}")
 print(f"    NaN en v18q1 cuando v18q=0 (no tiene)     : {n_nan_sin_tablet:,}")
 print(f"    → Todos los NaN se explican por v18q=0: {n_nan_con_tablet == 0}")
@@ -250,8 +224,6 @@ print("2.3  Dummies de varianza casi cero")
 print("=" * 65)
 
 # ── Análisis sistemático de varianza en dummies ───────────────────────────
-# Se calcula el porcentaje del modo dominante para cada variable binaria.
-# El umbral de 98% identifica variables con información casi nula.
 print("  [PRUEBA 2.3] Tabla completa de dummies con modo dominante ≥ 98%:")
 dummy_cols = [
     c for c in df.columns
@@ -344,8 +316,6 @@ print(
 )
 
 # ── Evidencia del outlier en meaneduc ────────────────────────────────────
-# El máximo individual de escolari es 21 años; un promedio de hogar de 37
-# es aritméticamente imposible y evidencia un error de captura de datos.
 print(f"\n  [PRUEBA 2.4] meaneduc — valor máximo vs máximo teórico:")
 print(f"    Max escolari (individual): {df['escolari'].max()} años")
 print(f"    Max meaneduc (promedio)  : {df['meaneduc'].max()} años  ← imposible")
@@ -385,8 +355,6 @@ print("2.5  Estandarización de edjefe / edjefa")
 print("=" * 65)
 
 # ── Diagnóstico de datos mixtos ───────────────────────────────────────────
-# Se muestra la distribución de valores antes de limpiar para documentar
-# que las columnas contienen strings junto con valores numéricos.
 print("  [PRUEBA 2.5a] Distribución de valores en edjefe (top 15, antes de limpiar):")
 print(df["edjefe"].value_counts().head(15).to_string())
 
@@ -448,8 +416,8 @@ todos_hogares    = set(df["idhogar"].unique())
 hogares_sin_jefe = todos_hogares - hogares_con_jefe
 
 for idhogar in hogares_sin_jefe:
-    miembros    = df[df["idhogar"] == idhogar]
-    idx_jefe    = miembros["escolari"].idxmax()
+    miembros = df[df["idhogar"] == idhogar]
+    idx_jefe = miembros["escolari"].idxmax()
     df.at[idx_jefe, "parentesco1"] = 1
 
 # Recalcular ed_jefe_final: si el jefe asignado tenía ed_jefe_final = 0
@@ -503,7 +471,6 @@ print("    → 'no' confirmado como tasa=0 por reconstrucción (100% den=0 → t
 print("    → 'yes' es información incompleta del entrevistador (tasa no calculada).")
 
 # ── Validación de la fórmula de reconstrucción ────────────────────────────
-# Se comparan dos candidatas contra los valores numéricos verificables.
 print("\n  [PRUEBA 2.7b] Validación de fórmulas candidatas:")
 dep_num = pd.to_numeric(dep_raw, errors="coerce")
 mask    = dep_num.notna()
@@ -624,10 +591,6 @@ print("2.8  Eliminación de variables adicionales")
 print("=" * 65)
 
 # ── Pruebas de relevancia de variables preservadas ────────────────────────
-# Se documenta empíricamente por qué instlevel1, estadocivil6 y estadocivil7
-# se mantienen en lugar de eliminarse junto con las demás variables del grupo.
-# Un Target menor indica mayor pobreza (1=extrema, 4=no pobre).
-
 print("  [PRUEBA 2.8a] instlevel1 (sin educación formal) vs nivel de pobreza:")
 print(f"    Target medio — instlevel1=0 (tiene algún nivel): "
       f"{df[df['instlevel1']==0]['Target'].mean():.3f}")
@@ -1101,8 +1064,7 @@ print("\n  ← Variables recuperadas respecto al notebook original")
 #
 # Variables creadas:
 #   • Indice_Activos_Tech         : suma de activos duraderos (proxy ingreso
-#                                   permanente). Sin Tiene_Celular (ya eliminada
-#                                   en sec. 6b) para evitar doble conteo.
+#                                   permanente).
 #   • Privacion_Servicios_Basicos : conteo NBI — 5 dimensiones de carencia
 #                                   (electricidad, agua, saneamiento, combustible,
 #                                   disposición de basura).
@@ -1173,8 +1135,6 @@ print(f"  Hacinamiento_Severo          →  "
       f"({df_model['Hacinamiento_Severo'].mean()*100:.1f}%)")
 
 # ── Eliminación de variables componentes ─────────────────────────────────
-# Los índices capturan la información de sus componentes; mantenerlos
-# generaría redundancia y elevaría el VIF innecesariamente.
 drop_componentes = [
     # Indice_Activos_Tech
     "Tiene_Nevera", "Tiene_Computador", "Tiene_TV",
@@ -1192,14 +1152,6 @@ df_model.drop(columns=[c for c in drop_componentes if c in df_model.columns], in
 print(f"  Shape tras feature engineering: {df_model.shape}")
 
 # ── 8.5  Visualizaciones diagnósticas para storytelling ──────────────────
-# Tres figuras de alta pertinencia para el cliente BID:
-#   Fig 1 — Distribución del Target: del sistema de 4 categorías SINIRUBE
-#            a la clasificación binaria de pobreza por hogar.
-#   Fig 2 — Los índices compuestos discriminan pobres de no pobres: valida
-#            que el feature engineering captura señal real.
-#   Fig 3 — Perfil geográfico: distribución de la pobreza por región y
-#            zona urbana/rural (clave para política pública).
-
 print("\n  Generando visualizaciones diagnósticas...")
 os.makedirs(DIR_VIZS, exist_ok=True)
 
@@ -1209,7 +1161,6 @@ _NO_POBRE = "#4575b4"   # azul
 # ── Fig 1: Distribución del Target ───────────────────────────────────────
 fig1, ax1 = plt.subplots(1, 2, figsize=(12, 5))
 
-# Panel izquierdo: 4 categorías originales (individuos)
 labels_orig = ["Pobreza\nextrema", "Pobreza\nmoderada", "Vulnerable", "No pobre"]
 colors_orig = [_POBRE, "#fc8d59", "#fee090", _NO_POBRE]
 bars_o = ax1[0].bar(labels_orig, _dist_target_orig.values,
@@ -1221,7 +1172,6 @@ ax1[0].set_title("Distribución original\n(4 categorías SINIRUBE)", fontsize=12
 ax1[0].set_ylabel("% de individuos")
 ax1[0].set_ylim(0, _dist_target_orig.max() * 1.2)
 
-# Panel derecho: Target binarizado por hogar
 _dist_bin = (df_model["Target"].value_counts(normalize=True)
              .mul(100).round(1)
              .rename({0: "No pobre", 1: "Pobre"})
@@ -1274,7 +1224,6 @@ print("    fig2_indices_por_pobreza.png  ✓")
 # ── Fig 3: Perfil geográfico de la pobreza ───────────────────────────────
 fig3, ax3 = plt.subplots(1, 2, figsize=(13, 5))
 
-# Tasa de pobreza por región
 _mapa_reg = {
     "Region_Central":          "Central",
     "Region_Chorotega":        "Chorotega",
@@ -1308,7 +1257,6 @@ ax3[0].set_xlabel("% de hogares pobres")
 ax3[0].legend(fontsize=8)
 ax3[0].set_xlim(0, _tasa_s.max() * 1.25)
 
-# Urbano vs rural
 if "Zona_Urbana" in df_model.columns:
     _t_urb = df_model[df_model["Zona_Urbana"] == 1]["Target"].mean() * 100
     _t_rur = df_model[df_model["Zona_Urbana"] == 0]["Target"].mean() * 100
@@ -1332,16 +1280,68 @@ print("    fig3_perfil_geografico.png    ✓")
 print(f"\n  3 figuras guardadas en: {DIR_VIZS}")
 
 # =============================================================================
-# 9. EXPORTACIÓN
+# 9. ESTANDARIZACIÓN DE VARIABLES NUMÉRICAS CONTINUAS
 # =============================================================================
-# El guardado se realiza al final del pipeline, después de todas las
-# transformaciones (secciones 2–8), para que el archivo refleje el estado
-# definitivo del dataset: limpio, agregado por hogar, renombrado y con
-# las variables compuestas de feature engineering incorporadas.
+# Se aplica StandardScaler (media = 0, desviación estándar = 1) únicamente
+# sobre variables continuas. Las dummies binarias (0/1) y Hacinamiento_Severo
+# NO se estandarizan: su escala ya es interpretable.
+# Los índices compuestos creados en el paso 8 SÍ se estandarizan, ya que
+# son variables de conteo con escalas heterogéneas.
+#
+# Nota: en producción el scaler debe ajustarse SOLO sobre el conjunto de
+# entrenamiento y aplicarse con .transform() sobre validación y test,
+# para evitar fuga de información (data leakage).
 # =============================================================================
 
 print("\n" + "=" * 65)
-print("9. EXPORTACIÓN")
+print("9. ESTANDARIZACIÓN DE VARIABLES NUMÉRICAS CONTINUAS")
+print("=" * 65)
+
+vars_continuas = [
+    # Variables originales continuas
+    "Monto_Alquiler",
+    "Total_Dormitorios",
+    "Personas_por_Cuarto",
+    "Promedio_Anos_Escolaridad",
+    "Promedio_Educ_Adultos",
+    "Edad_Promedio",
+    "Tasa_Dependencia",
+    "Cant_Ninos",
+    "Cant_Adultos",
+    "Cant_Adultos_Mayores",
+    "Proporcion_Mujeres",
+    # Índices compuestos del paso 8
+    "Indice_Activos_Tech",
+    "Privacion_Servicios_Basicos",
+    "Calidad_Materiales_Vivienda",
+]
+vars_continuas = [v for v in vars_continuas if v in df_model.columns]
+
+scaler = StandardScaler()
+df_model[vars_continuas] = scaler.fit_transform(df_model[vars_continuas])
+
+print(f"  Variables estandarizadas : {len(vars_continuas)}")
+for v in vars_continuas:
+    print(f"    • {v}")
+print(f"\n  Verificación (media ≈ 0, std ≈ 1):")
+print(
+    df_model[vars_continuas]
+    .agg(["mean", "std"])
+    .round(4).T
+    .to_string()
+)
+
+# =============================================================================
+# 10. EXPORTACIÓN
+# =============================================================================
+# El guardado se realiza al final del pipeline, después de todas las
+# transformaciones (secciones 2–9), para que el archivo refleje el estado
+# definitivo del dataset: limpio, agregado por hogar, renombrado, con
+# variables compuestas de feature engineering y estandarizado.
+# =============================================================================
+
+print("\n" + "=" * 65)
+print("10. EXPORTACIÓN")
 print("=" * 65)
 
 os.makedirs(DIR_DATOS, exist_ok=True)
@@ -1362,4 +1362,3 @@ print(
 print("\n" + "=" * 65)
 print("  Pipeline completado exitosamente.")
 print("=" * 65)
-
