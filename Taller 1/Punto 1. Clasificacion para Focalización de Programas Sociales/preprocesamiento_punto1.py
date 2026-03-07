@@ -45,8 +45,7 @@ Pipeline
      6b. Reducción de dimensionalidad post-agregación
   7. Renombrado de variables a nombres descriptivos
   8. Feature engineering (4 variables compuestas)
-  9. Estandarización de variables numéricas continuas
- 10. Exportación del dataset limpio
+  9. Exportación del dataset limpio (sin escalar — el scaler se entrena en el notebook)
 """
 
 # =============================================================================
@@ -59,7 +58,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-from sklearn.preprocessing import StandardScaler
 
 pd.set_option("display.max_columns", 50)
 sns.set_theme(style="whitegrid")
@@ -1280,85 +1278,18 @@ print("    fig3_perfil_geografico.png    ✓")
 print(f"\n  3 figuras guardadas en: {DIR_VIZS}")
 
 # =============================================================================
-# 9. ESTANDARIZACIÓN DE VARIABLES NUMÉRICAS CONTINUAS
-# =============================================================================
-# Se aplica StandardScaler (media = 0, desviación estándar = 1) únicamente
-# sobre variables continuas. Las dummies binarias (0/1) y Hacinamiento_Severo
-# NO se estandarizan: su escala ya es interpretable.
-# Los índices compuestos creados en el paso 8 SÍ se estandarizan, ya que
-# son variables de conteo con escalas heterogéneas.
-#
-# Nota: en producción el scaler debe ajustarse SOLO sobre el conjunto de
-# entrenamiento y aplicarse con .transform() sobre validación y test,
-# para evitar fuga de información (data leakage).
+# 9. EXPORTACIÓN
 # =============================================================================
 
 print("\n" + "=" * 65)
-print("9. ESTANDARIZACIÓN DE VARIABLES NUMÉRICAS CONTINUAS")
-print("=" * 65)
-
-vars_continuas = [
-    # Variables originales continuas
-    "Monto_Alquiler",
-    "Total_Dormitorios",
-    "Personas_por_Cuarto",
-    "Promedio_Anos_Escolaridad",
-    "Promedio_Educ_Adultos",
-    "Edad_Promedio",
-    "Tasa_Dependencia",
-    "Cant_Ninos",
-    "Cant_Adultos",
-    "Cant_Adultos_Mayores",
-    "Proporcion_Mujeres",
-    # Índices compuestos del paso 8
-    "Indice_Activos_Tech",
-    "Privacion_Servicios_Basicos",
-    "Calidad_Materiales_Vivienda",
-]
-vars_continuas = [v for v in vars_continuas if v in df_model.columns]
-
-scaler = StandardScaler()
-df_model[vars_continuas] = scaler.fit_transform(df_model[vars_continuas])
-
-print(f"  Variables estandarizadas : {len(vars_continuas)}")
-for v in vars_continuas:
-    print(f"    • {v}")
-print(f"\n  Verificación (media ≈ 0, std ≈ 1):")
-print(
-    df_model[vars_continuas]
-    .agg(["mean", "std"])
-    .round(4).T
-    .to_string()
-)
-
-# =============================================================================
-# 10. EXPORTACIÓN
-# =============================================================================
-# El guardado se realiza al final del pipeline, después de todas las
-# transformaciones (secciones 2–9), para que el archivo refleje el estado
-# definitivo del dataset: limpio, agregado por hogar, renombrado, con
-# variables compuestas de feature engineering y estandarizado.
-# =============================================================================
-
-print("\n" + "=" * 65)
-print("10. EXPORTACIÓN")
+print("9. EXPORTACIÓN")
 print("=" * 65)
 
 os.makedirs(DIR_DATOS, exist_ok=True)
 
-output_path = f"{DIR_DATOS}/train_cleaned_hogar.csv"
+output_path = os.path.join(DIR_DATOS, "train_cleaned_hogar.csv")
 df_model.to_csv(output_path, index=False)
 
 print(f"  Archivo guardado : {output_path}")
 print(f"  Filas            : {df_model.shape[0]:,}")
 print(f"  Columnas         : {df_model.shape[1]}")
-print("\n  Distribución final del Target:")
-print(
-    df_model["Target"]
-    .value_counts(normalize=True).mul(100).round(2)
-    .rename({0: "No pobre (0)", 1: "Pobre (1)"})
-    .to_string()
-)
-print("\n" + "=" * 65)
-print("  Pipeline completado exitosamente.")
-print("=" * 65)
