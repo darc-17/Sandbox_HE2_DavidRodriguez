@@ -3,27 +3,6 @@ Punto 1 – Clasificación para Focalización de Programas Sociales
 ================================================================
 Taller 1 · Consultoría Económica con IA Responsable
 Autores : David Rodríguez · Juan Rueda
-Fecha   : 2026
-
-Contexto
---------
-Cliente  : BID (Banco Interamericano de Desarrollo)
-País     : Costa Rica
-Programa : Subsidios de asistencia social (IMAS / SINIRUBE)
-Problema : El modelo vigente comete errores de focalización:
-           • Falsos negativos → hogares vulnerables excluidos del subsidio.
-           • Falsos positivos → hogares no necesitados que reciben el subsidio.
-
-Variable objetivo (Target)
---------------------------
-  1 = Pobreza extrema   → clase POBRE     (Target_binario = 1)
-  2 = Pobreza moderada  → clase POBRE     (Target_binario = 1)
-  3 = Vulnerable        → clase NO POBRE  (Target_binario = 0)
-  4 = No pobre          → clase NO POBRE  (Target_binario = 0)
-
-La binarización se aplica con la regla de mayoría a nivel de hogar.
-En caso de empate se elige 1 (pobre) para minimizar falsos negativos,
-acorde al objetivo del programa de no excluir hogares vulnerables.
 
 Pipeline
 --------
@@ -118,7 +97,7 @@ drop_redundantes = [
     # Subtotales por género ya calculados: r4h3 = r4h1+r4h2, etc.
     "r4h3", "r4m3", "r4t3",
 
-    # Género — male + female = 1 siempre; se conserva female
+    # Se conserva female
     "male",
 ]
 
@@ -129,10 +108,6 @@ print(f"  Shape      : {df.shape}")
 
 # -----------------------------------------------------------------------------
 # 2.2  IMPUTACIÓN DE VALORES FALTANTES
-# -----------------------------------------------------------------------------
-# Cada missing tiene una causa estructural; se imputa según su mecanismo
-# subyacente. Cuando el missing mismo es informativo, se crea una variable
-# indicadora binaria antes de imputar.
 # -----------------------------------------------------------------------------
 
 print("\n" + "=" * 65)
@@ -151,17 +126,15 @@ print("  Variables con missing:")
 print(miss_df.to_string())
 
 # ── Análisis del mecanismo causal de cada missing ─────────────────────────
-# Se verifica empíricamente que los NaN no son aleatorios, sino que
-# tienen una causa estructural que justifica la imputación determinística.
 
-print("\n  [PRUEBA 2.2a] v18q1 — NaN ocurre exclusivamente cuando v18q=0?")
+print("\n v18q1 — NaN ocurre exclusivamente cuando v18q=0?")
 n_nan_con_tablet = df[df["v18q"] == 1]["v18q1"].isnull().sum()
 n_nan_sin_tablet = df[df["v18q"] == 0]["v18q1"].isnull().sum()
 print(f"    NaN en v18q1 cuando v18q=1 (tiene tablet) : {n_nan_con_tablet}")
 print(f"    NaN en v18q1 cuando v18q=0 (no tiene)     : {n_nan_sin_tablet:,}")
 print(f"    → Todos los NaN se explican por v18q=0: {n_nan_con_tablet == 0}")
 
-print("\n  [PRUEBA 2.2b] v2a1 — NaN coincide con no-arrendatarios (tipovivi3=0)?")
+print("\n v2a1 — NaN coincide con no-arrendatarios (tipovivi3=0)?")
 rent_cross = df.groupby("tipovivi3")["v2a1"].agg(
     n_missing =lambda x: x.isnull().sum(),
     n_presente=lambda x: x.notnull().sum()
@@ -170,7 +143,7 @@ print(rent_cross.rename(index={0: "tipovivi3=0 (no arrienda)",
                                 1: "tipovivi3=1 (arrienda)"}).to_string())
 print("    → NaN ocurren solo en tipovivi3=0; imputar 0 es equivalente a no pago de arriendo.")
 
-print("\n  [PRUEBA 2.2c] rez_esc — NaN es estructural por rango de edad?")
+print("\n rez_esc — NaN es estructural por rango de edad?")
 df["_age_group"] = pd.cut(df["age"], bins=[0, 5, 17, 65, 120],
                            labels=["0-5 años", "6-17 años", "18-65 años", "65+ años"])
 rez_miss = df.groupby("_age_group", observed=True)["rez_esc"].apply(
@@ -182,7 +155,6 @@ df.drop(columns=["_age_group"], inplace=True)
 
 # ── v18q1 (número de tablets) ─────────────────────────────────────────────
 # NaN aparece exclusivamente cuando v18q = 0 (el hogar no tiene tablet).
-# Imputación: 0 (sin tablets).
 assert df[df["v18q"] == 1]["v18q1"].isnull().sum() == 0, (
     "ERROR: NaN en v18q1 para hogares que declaran tener tablet."
 )
@@ -190,19 +162,18 @@ df["v18q1"] = df["v18q1"].fillna(0)
 
 # ── v2a1 (renta mensual) ──────────────────────────────────────────────────
 # NaN cuando el hogar no paga arriendo (tipovivi3 = 0).
-# Se crea indicador paga_arriendo antes de imputar para no perder esa señal.
+# Se crea var paga_arriendo para saber si un hogar paga o no arriendo.
 df["paga_arriendo"] = df["v2a1"].notna().astype(int)
 df["v2a1"] = df["v2a1"].fillna(0)
 
-# ── rez_esc (retraso escolar) ─────────────────────────────────────────────
+# ── rez_esc (rezago escolar) ─────────────────────────────────────────────
 # NaN para edades no escolares (< 6 y > 17 años, ~83 % del total).
-# Se crea indicador tiene_retraso para preservar la señal de niños en edad
-# escolar que sí presentan retraso.
+# Se crea var tiene_rezago para preservar la señal de niños en edad escolar que sí presentan rezago.
 df["tiene_retraso"] = df["rez_esc"].notna().astype(int)
 df["rez_esc"] = df["rez_esc"].fillna(0)
 
 # ── meaneduc (promedio años educación adultos 18+) ────────────────────────
-# Solo 5 filas; se imputa con la mediana del resto de la muestra.
+# Solo 5 filas; se imputan los missings con la mediana del resto de la muestra.
 df["meaneduc"] = df["meaneduc"].fillna(df["meaneduc"].median())
 
 print(f"\n  Missing restantes : {df.isnull().sum().sum()}")
@@ -211,18 +182,13 @@ print(f"  Shape             : {df.shape}")
 # -----------------------------------------------------------------------------
 # 2.3  DUMMIES DE VARIANZA CASI CERO
 # -----------------------------------------------------------------------------
-# Se eliminan dummies con modo dominante ≥ 98 % y sin valor predictivo
-# social documentado en la metodología NBI de Costa Rica.
-# Las variables con baja varianza que SÍ son indicadores de carencia crítica
-# se preservan explícitamente en la lista `preservar_nbi`.
-# -----------------------------------------------------------------------------
 
 print("\n" + "=" * 65)
 print("2.3  Dummies de varianza casi cero")
 print("=" * 65)
 
 # ── Análisis sistemático de varianza en dummies ───────────────────────────
-print("  [PRUEBA 2.3] Tabla completa de dummies con modo dominante ≥ 98%:")
+print(" Tabla de dummies con modo dominante ≥ 98%:")
 dummy_cols = [
     c for c in df.columns
     if df[c].nunique() == 2
@@ -290,18 +256,12 @@ print(f"  Shape      : {df.shape}")
 # -----------------------------------------------------------------------------
 # 2.4  TRATAMIENTO DE OUTLIERS
 # -----------------------------------------------------------------------------
-# Dos variables requieren corrección:
-#   • v2a1 (renta mensual): cola derecha extrema (max = 1,000,000 CRC).
-#     Se capea al percentil 99 para no distorsionar la frontera de pobreza.
-#   • meaneduc (promedio años educación adultos): valor máximo = 37, imposible
-#     dado que el máximo de escolari es 21. Es un error de captura. Se capea
-#     al máximo teórico (21 años).
-# -----------------------------------------------------------------------------
 
 print("\n" + "=" * 65)
 print("2.4  Tratamiento de outliers")
 print("=" * 65)
 
+#Verificamos distribución de vars numéricas
 cont_vars = ["age", "escolari", "meaneduc", "overcrowding",
              "hogar_total", "rooms", "bedrooms", "v2a1"]
 print("  Estadísticas clave (pre-capping):")
@@ -314,7 +274,7 @@ print(
 )
 
 # ── Evidencia del outlier en meaneduc ────────────────────────────────────
-print(f"\n  [PRUEBA 2.4] meaneduc — valor máximo vs máximo teórico:")
+print(f"\n  meaneduc — valor máximo vs máximo teórico:")
 print(f"    Max escolari (individual): {df['escolari'].max()} años")
 print(f"    Max meaneduc (promedio)  : {df['meaneduc'].max()} años  ← imposible")
 print(f"    Registros con meaneduc > {int(df['escolari'].max())}: "
@@ -353,17 +313,17 @@ print("2.5  Estandarización de edjefe / edjefa")
 print("=" * 65)
 
 # ── Diagnóstico de datos mixtos ───────────────────────────────────────────
-print("  [PRUEBA 2.5a] Distribución de valores en edjefe (top 15, antes de limpiar):")
+print(" Distribución de valores en edjefe (top 15, antes de limpiar):")
 print(df["edjefe"].value_counts().head(15).to_string())
 
-print("\n  [PRUEBA 2.5b] Distribución de valores en edjefa (top 10):")
+print("\n Distribución de valores en edjefa (top 10):")
 print(df["edjefa"].value_counts().head(10).to_string())
 
 n_yes_jefe = (df["edjefe"] == "yes").sum()
 n_no_jefe  = (df["edjefe"] == "no").sum()
 n_yes_jefa = (df["edjefa"] == "yes").sum()
 n_no_jefa  = (df["edjefa"] == "no").sum()
-print(f"\n  [PRUEBA 2.5c] Strings en edjefe: 'yes'={n_yes_jefe:,}  'no'={n_no_jefe:,}")
+print(f"\n Strings en edjefe: 'yes'={n_yes_jefe:,}  'no'={n_no_jefe:,}")
 print(f"               Strings en edjefa: 'yes'={n_yes_jefa:,}  'no'={n_no_jefa:,}")
 print("    → Presencia de strings confirma necesidad de estandarización.")
 
@@ -371,7 +331,7 @@ n_ambos_cero = (
     (pd.to_numeric(df["edjefe"], errors="coerce").fillna(0) == 0) &
     (pd.to_numeric(df["edjefa"], errors="coerce").fillna(0) == 0)
 ).sum()
-print(f"\n  [PRUEBA 2.5d] Registros con edjefe=0 Y edjefa=0 (antes): {n_ambos_cero:,}")
+print(f"\n Registros con edjefe=0 Y edjefa=0 (antes): {n_ambos_cero:,}")
 print("    → Estos registros generan sin_jefe_educado=1 tras la limpieza.")
 
 
@@ -398,11 +358,9 @@ print(f"  Shape: {df.shape}")
 # -----------------------------------------------------------------------------
 # 2.6  REPARACIÓN DE HOGARES SIN JEFE REGISTRADO
 # -----------------------------------------------------------------------------
-# Un pequeño número de hogares no tiene ningún miembro con parentesco1 = 1.
-# Se designa jefe de facto a quien tiene mayor escolaridad (idxmax), como
-# criterio de capacidad de gestión del hogar. En caso de empate, idxmax
-# toma el primer registro (usualmente la persona de mayor edad).
-# Tras la asignación, se recalcula ed_jefe_final.
+# Algunos hogares no tiene ningún miembro con parentesco1 = 1.
+# Se designa jefe de facto a quien tiene mayor escolaridad, como
+# En caso de empate, se toma el primer registro (usualmente la persona de mayor edad).
 # -----------------------------------------------------------------------------
 
 print("\n" + "=" * 65)
@@ -431,23 +389,11 @@ print(f"  Hogares sin jefe detectados y corregidos: {len(hogares_sin_jefe)}")
 # -----------------------------------------------------------------------------
 # 2.7  RECONSTRUCCIÓN DE tasa_dependencia
 # -----------------------------------------------------------------------------
-# La variable original 'dependency' contiene datos mixtos:
-#   • 4,238 valores numéricos (tasa calculada correctamente)
-#   • 1,619 "yes"  (hay dependientes; el entrevistador no calculó la tasa)
-#   • 1,330 "no"   (sin dependientes; equivale a tasa = 0)
+# La variable original 'dependency' contiene datos mixtos.
+# Optamos por reconstruir desde las variables demográficas del hogar, usando
+# la fórmula original del codebook: tasa_dependencia = (hogar_nin + hogar_mayor) / (hogar_adul - hogar_mayor)
 #
-# Decisión: reconstruir desde las variables demográficas del hogar, usando
-# la fórmula original del INEC Costa Rica verificada contra los valores
-# numéricos disponibles (correlación de Pearson = 1.0000):
-#
-#   tasa_dependencia = (hogar_nin + hogar_mayor) / (hogar_adul - hogar_mayor)
-#
-#   Numerador  : dependientes = niños 0–19 años + adultos 65+
-#   Denominador: adultos en edad de trabajar (18–64)
-#               = hogar_adul (18+) − hogar_mayor (65+)
-#
-# Caso borde: denominador = 0 (hogar compuesto solo de adultos mayores)
-# → tasa = 8 (valor techo del dataset original, convención INEC).
+# Caso denominador = 0 (hogar compuesto solo de adultos mayores) → tasa = 8 (valor techo del dataset original).
 # -----------------------------------------------------------------------------
 
 print("\n" + "=" * 65)
@@ -475,11 +421,11 @@ mask    = dep_num.notna()
 d_val   = df[mask].copy()
 d_val["dep_orig"] = dep_num[mask]
 
-# Fórmula A (INEC Costa Rica): (nin + mayor) / (adul - mayor)
+# Fórmula A: (nin + mayor) / (adul - mayor)
 d_val["fA"] = ((d_val["hogar_nin"] + d_val["hogar_mayor"]) /
                (d_val["hogar_adul"] - d_val["hogar_mayor"]).replace(0, np.nan))
 
-# Fórmula B (alternativa simple): (nin + mayor) / adul
+# Fórmula B: (nin + mayor) / adul
 d_val["fB"] = ((d_val["hogar_nin"] + d_val["hogar_mayor"]) /
                d_val["hogar_adul"].replace(0, np.nan))
 
@@ -588,27 +534,6 @@ print("\n" + "=" * 65)
 print("2.8  Eliminación de variables adicionales")
 print("=" * 65)
 
-# ── Pruebas de relevancia de variables preservadas ────────────────────────
-print("  [PRUEBA 2.8a] instlevel1 (sin educación formal) vs nivel de pobreza:")
-print(f"    Target medio — instlevel1=0 (tiene algún nivel): "
-      f"{df[df['instlevel1']==0]['Target'].mean():.3f}")
-print(f"    Target medio — instlevel1=1 (sin educación)    : "
-      f"{df[df['instlevel1']==1]['Target'].mean():.3f}")
-print(f"    Prevalencia en muestra: {df['instlevel1'].mean()*100:.1f}% de registros")
-print("    → Target menor en instlevel1=1 confirma asociación con mayor pobreza.")
-print("    → Se preserva como predictor NBI directo (no capturado por meaneduc).")
-
-print("\n  [PRUEBA 2.8b] estadocivil6 (viudo/a) vs nivel de pobreza:")
-print(f"    Target medio — estadocivil6=0: {df[df['estadocivil6']==0]['Target'].mean():.3f}")
-print(f"    Target medio — estadocivil6=1: {df[df['estadocivil6']==1]['Target'].mean():.3f}")
-print(f"    Prevalencia: {df['estadocivil6'].mean()*100:.1f}%")
-
-print("\n  [PRUEBA 2.8c] estadocivil7 (soltero/a) vs nivel de pobreza:")
-print(f"    Target medio — estadocivil7=0: {df[df['estadocivil7']==0]['Target'].mean():.3f}")
-print(f"    Target medio — estadocivil7=1: {df[df['estadocivil7']==1]['Target'].mean():.3f}")
-print(f"    Prevalencia: {df['estadocivil7'].mean()*100:.1f}%")
-print("    → Diferencia en Target justifica preservar ambas variables de estado civil.")
-
 drop_adicionales = [
     # a) Conteos demográficos desagregados
     #    (r4h3, r4m3, r4t3 ya eliminados en 2.1)
@@ -660,21 +585,11 @@ print("    • estadocivil7 (soltero/a — potencial hogar monoparental)")
 # =============================================================================
 # 3. BINARIZACIÓN DEL TARGET
 # =============================================================================
-# Regla de binarización:
-#   Target ≤ 2  →  1  (POBRE: pobreza extrema o moderada)
-#   Target  > 2  →  0  (NO POBRE: vulnerable o no pobre)
-#
-# Se aplica la regla de mayoría a nivel de hogar para garantizar consistencia:
-# todos los miembros de un mismo hogar deben recibir el mismo Target.
-# Cuando hay empate (50 % - 50 %), se asigna 1 (pobre) para minimizar
-# falsos negativos y proteger a hogares en situación límite.
-# =============================================================================
-
 print("\n" + "=" * 65)
 print("3. BINARIZACIÓN DEL TARGET")
 print("=" * 65)
 
-# Guardar distribución para la visualización posterior (antes de binarizar)
+# Guardar distribución original para la visualización posterior
 _dist_target_orig = df["Target"].value_counts(normalize=True).mul(100).round(1).sort_index()
 
 print("  Distribución original (individuos):")
@@ -686,18 +601,18 @@ print(
     .to_string()
 )
 
-# Paso 1: binarización individual
+# Binarización individual
 df["Target_bin"] = (df["Target"] <= 2).astype(int)
 
-# Paso 2: regla de mayoría por hogar, con desempate pro-pobre
+# Regla de mayoría por hogar, con desempate para hogar pobre
 target_por_hogar = (
     df.groupby("idhogar")["Target_bin"]
-    .agg(lambda x: x.mode().max())  # .max() → en empate 0-1 elige 1
+    .agg(lambda x: x.mode().max())
     .to_dict()
 )
 df["Target_final"] = df["idhogar"].map(target_por_hogar)
 
-# Diagnóstico: hogares con Target inconsistente entre miembros
+# Hogares con Target inconsistente entre miembros
 inconsistentes = (df.groupby("idhogar")["Target_bin"].nunique() > 1).sum()
 cambiados = sum(
     1 for h in df["idhogar"].unique()
@@ -720,23 +635,6 @@ print(
 
 # =============================================================================
 # 4. AGREGACIÓN AL NIVEL DE HOGAR (idhogar)
-# =============================================================================
-# El dataset original tiene un registro por individuo. El programa social
-# focaliza hogares, no personas, por lo que se colapsa a un registro por hogar.
-#
-# Reglas de agregación por tipo de variable:
-#   • female           → mean   : proporción de mujeres en el hogar.
-#                                  (max daría presencia/ausencia, no proporción)
-#   • tasa_dependencia → first  : ya es una variable de nivel hogar; todos los
-#                                  miembros comparten el mismo valor.
-#   • v2a1, bedrooms, overcrowding, activos del hogar
-#                      → max    : valor representativo del hogar (es el mismo
-#                                  para todos los miembros en el dataset original)
-#   • escolari, meaneduc, age, composición del hogar
-#                      → mean   : perfil promedio de los miembros del hogar.
-#   • Resto de dummies → max    : el hogar "tiene" la característica si al menos
-#                                  un miembro la presenta.
-#   • Target           → first  : ya homogeneizado en paso 3.
 # =============================================================================
 
 print("\n" + "=" * 65)
@@ -789,8 +687,6 @@ print(
 # coeficiente por la correlación con otras variables.
 #   VIF = ∞   → multicolinealidad perfecta (columna linealmente dependiente)
 #   VIF > 10  → redundancia alta
-#
-# Este análisis es diagnóstico: guía las eliminaciones del paso 6.
 # =============================================================================
 
 print("\n" + "=" * 65)
@@ -822,17 +718,7 @@ if n_inf > 0:
         print(f"    • {v}")
 
 # =============================================================================
-# 6a. RESOLUCIÓN DE MULTICOLINEALIDADES PERFECTAS (post-VIF)
-# =============================================================================
-# Se elimina una variable de cada grupo de dummies que suman exactamente 1
-# (trampa de variables ficticias), y se eliminan redundancias confirmadas.
-#
-# Referencias usadas:
-#   • Región        → lugar6 (Huetar Norte) eliminada como referencia
-#   • Agua          → abastaguadentro eliminada como referencia
-#   • Tenencia      → tipovivi1 (propia, pagada) eliminada como referencia;
-#                     tipovivi3 (arrendada) también eliminada para romper
-#                     el ciclo de VIF infinito en el grupo de tenencia
+# 6a. RESOLUCIÓN DE MULTICOLINEALIDADES PERFECTAS
 # =============================================================================
 
 print("\n" + "=" * 65)
@@ -902,18 +788,6 @@ if n_inf_post == 0:
 # =============================================================================
 # 6b. REDUCCIÓN DE DIMENSIONALIDAD POST-AGREGACIÓN
 # =============================================================================
-# Tras colapsar al nivel de hogar, algunas variables pierden poder explicativo
-# o quedan redundadas por versiones más parsimoniosas.
-#
-# DECISIÓN DELIBERADA sobre pareddes y pisonotiene:
-#   Se PRESERVAN. Aunque la versión anterior del código las eliminaba bajo el
-#   supuesto de que estaban implícitas en epared1 (Pared_Mala) y eviv1
-#   (Piso_Malo), hay una diferencia importante:
-#     • pareddes / pisonotiene : medición OBJETIVA del material específico
-#     • epared1  / eviv1       : evaluación SUBJETIVA del entrevistador
-#   En la metodología NBI de Costa Rica, los materiales son el criterio
-#   oficial, no la evaluación subjetiva. Se mantienen ambas dimensiones.
-# =============================================================================
 
 print("\n" + "=" * 65)
 print("6b. Reducción de dimensionalidad post-agregación")
@@ -973,7 +847,7 @@ diccionario_nombres = {
     # ── Educación ─────────────────────────────────────────────────────────
     "escolari":         "Promedio_Anos_Escolaridad",
     "meaneduc":         "Promedio_Educ_Adultos",
-    "instlevel1":       "Sin_Educacion",          # predictor NBI preservado
+    "instlevel1":       "Sin_Educacion",
     "instlevel6":       "Educ_Tecnica_Incompleta",
     "instlevel7":       "Educ_Tecnica_Completa",
     "instlevel9":       "Educ_Postgrado",
@@ -1054,23 +928,7 @@ for i, col in enumerate(df_model.columns, 1):
 print("\n  ← Variables recuperadas respecto al notebook original")
 
 # =============================================================================
-# 8. FEATURE ENGINEERING — 4 VARIABLES COMPUESTAS
-# =============================================================================
-# Se crean índices que resumen dimensiones clave de bienestar del hogar.
-# Tras la creación se eliminan las variables componentes para reducir
-# dimensionalidad: la información queda capturada en los índices.
-#
-# Variables creadas:
-#   • Indice_Activos_Tech         : suma de activos duraderos (proxy ingreso
-#                                   permanente).
-#   • Privacion_Servicios_Basicos : conteo NBI — 5 dimensiones de carencia
-#                                   (electricidad, agua, saneamiento, combustible,
-#                                   disposición de basura).
-#   • Calidad_Materiales_Vivienda : índice +/− de materiales. Se excluye
-#                                   Techo_Zinc (mayoritario en todos los estratos;
-#                                   no discrimina pobreza).
-#   • Hacinamiento_Severo         : dummy binaria > 3 personas/cuarto.
-#                                   Captura el efecto de umbral no lineal.
+# 8. FEATURE ENGINEERING
 # =============================================================================
 
 print("\n" + "=" * 65)
